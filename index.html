@@ -1,0 +1,417 @@
+<!DOCTYPE html>
+
+<html lang="en">
+<head>
+<title>Web VR boilerplate</title>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, user-scalable=no, minimum-scale=1.0, maximum-scale=1.0, shrink-to-fit=no">
+<meta name="mobile-web-app-capable" content="yes">
+<meta name="apple-mobile-web-app-capable" content="yes" />
+<meta name="apple-mobile-web-app-status-bar-style" content="black-translucent" />
+<style>
+body {
+  width: 100%;
+  height: 100%;
+  background-color: #000;
+  color: #fff;
+  margin: 0px;
+  padding: 0;
+  overflow: hidden;
+}
+</style>
+</head>
+
+<body>
+
+</body>
+
+<script>
+/*
+ * Debug parameters.
+ */
+WebVRConfig = {
+  /**
+   * webvr-polyfill configuration
+   */
+
+  // Forces availability of VR mode.
+  //FORCE_ENABLE_VR: true, // Default: false.
+  // Complementary filter coefficient. 0 for accelerometer, 1 for gyro.
+  //K_FILTER: 0.98, // Default: 0.98.
+  // How far into the future to predict during fast motion.
+  //PREDICTION_TIME_S: 0.040, // Default: 0.040 (in seconds).
+  // Flag to disable touch panner. In case you have your own touch controls
+  //TOUCH_PANNER_DISABLED: true, // Default: false.
+  // Enable yaw panning only, disabling roll and pitch. This can be useful for
+  // panoramas with nothing interesting above or below.
+  //YAW_ONLY: true, // Default: false.
+  // Enable the deprecated version of the API (navigator.getVRDevices).
+  //ENABLE_DEPRECATED_API: true, // Default: false.
+  // Scales the recommended buffer size reported by WebVR, which can improve
+  // performance. Making this very small can lower the effective resolution of
+  // your scene.
+  BUFFER_SCALE: 0.5, // default: 1.0
+  // Allow VRDisplay.submitFrame to change gl bindings, which is more
+  // efficient if the application code will re-bind it's resources on the
+  // next frame anyway.
+  // Dirty bindings include: gl.FRAMEBUFFER_BINDING, gl.CURRENT_PROGRAM,
+  // gl.ARRAY_BUFFER_BINDING, gl.ELEMENT_ARRAY_BUFFER_BINDING,
+  // and gl.TEXTURE_BINDING_2D for texture unit 0
+  // Warning: enabling this might lead to rendering issues.
+  //DIRTY_SUBMIT_FRAME_BINDINGS: true // default: false
+};
+</script>
+
+<!--
+  A polyfill for Promises. Needed for IE and Edge.
+  -->
+<script src="node_modules/es6-promise/dist/es6-promise.js"></script>
+
+<!--
+  three.js 3d library
+  -->
+<script src="node_modules/three/three.js"></script>
+
+<!--
+  VRControls.js acquires positional information from connected VR devices and applies the transformations to a three.js camera object.
+   -->
+<script src="node_modules/three/examples/js/controls/VRControls.js"></script>
+
+<!--
+  VREffect.js handles stereo camera setup and rendering.
+  -->
+<script src="node_modules/three/examples/js/effects/VREffect.js"></script>
+
+<!--
+  A polyfill for WebVR using the Device{Motion,Orientation}Event API.
+  -->
+<script src="node_modules/webvr-polyfill/build/webvr-polyfill.js"></script>
+
+<!--
+  Helps enter and exit VR mode, provides best practices while in VR.
+  -->
+<script src="build/webvr-manager.js"></script>
+
+<script src="https://cdn.socket.io/socket.io-1.4.5.js"></script>
+<script src="https://cdnjs.cloudflare.com/ajax/libs/gsap/1.18.5/TweenMax.min.js"></script>
+<script src="build/cannon.js"></script>
+<script src="js/PointerLockControls.js"></script>
+<script src="js/VoxelLandscape.js"></script>
+
+<script>
+var socket = io('http://192.168.1.63:8888');
+socket.on('keyDown_vr', function (data) {
+  console.log(data);
+  keyDownHandler(data);
+
+});
+socket.on('news', function (data) {
+  console.log(data);
+  socket.emit('my other event', { my: 'data' });
+});
+
+// Setup three.js WebGL renderer. Note: Antialiasing is a big performance hit.
+// Only enable it if you actually need to.
+var renderer = new THREE.WebGLRenderer({antialias: true});
+renderer.setPixelRatio(window.devicePixelRatio);
+
+// Append the canvas element created by the renderer to document body element.
+document.body.appendChild(renderer.domElement);
+
+// Create a three.js scene.
+var scene = new THREE.Scene();
+
+// Create a three.js camera.
+var camera = new THREE.PerspectiveCamera(75, window.innerWidth / window.innerHeight, 0.1, 10000);
+
+// Apply VR headset positional data to camera.
+var controls = new THREE.VRControls(camera);
+controls.standing = true;
+
+// Apply VR stereo rendering to renderer.
+var effect = new THREE.VREffect(renderer);
+effect.setSize(window.innerWidth, window.innerHeight);
+
+
+// Add a repeating grid as a skybox.
+var boxSize = 15;
+var loader = new THREE.TextureLoader();
+loader.load('img/box.png', onTextureLoaded);
+
+function onTextureLoaded(texture) {
+  texture.wrapS = THREE.RepeatWrapping;
+  texture.wrapT = THREE.RepeatWrapping;
+  texture.repeat.set(boxSize, boxSize);
+
+  var geometry = new THREE.BoxGeometry(boxSize, boxSize, boxSize);
+  var material = new THREE.MeshBasicMaterial({
+    map: texture,
+    color: 0x01BE00,
+    side: THREE.BackSide
+  });
+
+  // Align the skybox to the floor (which is at y=0).
+  skybox = new THREE.Mesh(geometry, material);
+  skybox.position.y = boxSize/2;
+  scene.add(skybox);
+
+  // For high end VR devices like Vive and Oculus, take into account the stage
+  // parameters provided.
+  setupStage();
+}
+
+
+// Create a VR manager helper to enter and exit VR mode.
+var params = {
+  hideButton: false, // Default: false.
+  isUndistorted: false // Default: false.
+};
+var manager = new WebVRManager(renderer, effect, params);
+
+// Create 3D objects.
+var geometry = new THREE.BoxGeometry(0.5, 0.5, 0.5);
+var material = new THREE.MeshNormalMaterial();
+var cube = new THREE.Mesh(geometry, material);
+
+// Position cube mesh to be right in front of you.
+cube.position.set(0, controls.userHeight, -1);
+
+// Add cube mesh to your three.js scene
+scene.add(cube);
+
+var dummyCam = new THREE.Object3D();
+
+var dirVector = new THREE.Vector3( 0, 0, - 1 );
+camera.getWorldDirection( dirVector );
+
+//CANON stuff
+// Setup our world
+var world = new CANNON.World();
+world.gravity.set(0, 0, -9.82); // m/s²
+// Create a sphere
+var radius = 1; // m
+var sphereBody = new CANNON.Body({
+   mass: 5, // kg
+   position: new CANNON.Vec3(0, 0, 10), // m
+   shape: new CANNON.Sphere(radius)
+});
+world.addBody(sphereBody);
+// Create a plane
+var groundBody = new CANNON.Body({
+    mass: 0 // mass == 0 makes the body static
+});
+var groundShape = new CANNON.Plane();
+groundBody.addShape(groundShape);
+world.addBody(groundBody);
+
+var fixedTimeStep = 1.0 / 60.0; // seconds
+var maxSubSteps = 3;
+
+// Create a slippery material (friction coefficient = 0.0)
+var physicsMaterial = new CANNON.Material("slipperyMaterial");
+var physicsContactMaterial = new CANNON.ContactMaterial(physicsMaterial,
+  physicsMaterial,
+  0.0, // friction coefficient
+  0.3  // restitution
+);
+// We must add the contact materials to the world
+world.addContactMaterial(physicsContactMaterial);
+
+var nx = 50,
+ny = 8,
+nz = 50,
+sx = 0.5,
+sy = 0.5,
+sz = 0.5;
+
+var sphereShape = new CANNON.Sphere(radius);
+var sphereBody2 = new CANNON.Body({ mass: 5, material: physicsMaterial });
+sphereBody.addShape(sphereShape);
+sphereBody.position.set(0,1,0);
+sphereBody.linearDamping = 0.9;
+world.addBody(sphereBody2);
+
+
+cube.add(camera);
+
+//var myControl = new PointerLockControls( camera , sphereBody );
+
+// Start the simulation loop
+var lastTime;
+(function simloop(time){
+  requestAnimationFrame(simloop);
+  if(lastTime !== undefined){
+     var dt = (time - lastTime) / 1000;
+     world.step(fixedTimeStep, dt, maxSubSteps);
+  }
+  //console.log("Sphere z position: " + sphereBody.position.z);
+  cube.position.y = sphereBody.position.z;
+
+  cube.position.x = sphereBody.position.x ;
+  cube.position.z = sphereBody.position.y ;
+
+  lastTime = time;
+})();
+
+// Kick off animation loop
+requestAnimationFrame(animate);
+
+window.addEventListener('resize', onResize, true);
+window.addEventListener('vrdisplaypresentchange', onResize, true);
+document.addEventListener( 'keydown', keyDownHandler, false );
+
+// Request animation frame loop function
+var lastRender = 0;
+function animate(timestamp) {
+  var delta = Math.min(timestamp - lastRender, 500);
+  lastRender = timestamp;
+
+  // Apply rotation to cube mesh
+  //cube.rotation.y += delta * 0.0006;
+
+  // Update VR headset position and apply to camera.
+  controls.update();
+
+  // Render the scene through the manager.
+  manager.render(scene, camera, timestamp);
+
+  camera.getWorldDirection( dirVector );
+  //console.log(dirVector);
+
+  requestAnimationFrame(animate);
+}
+
+function onResize(e) {
+  effect.setSize(window.innerWidth, window.innerHeight);
+  camera.aspect = window.innerWidth / window.innerHeight;
+  camera.updateProjectionMatrix();
+}
+
+var display;
+
+// Get the HMD, and if we're dealing with something that specifies
+// stageParameters, rearrange the scene.
+function setupStage() {
+  navigator.getVRDisplays().then(function(displays) {
+    if (displays.length > 0) {
+      display = displays[0];
+      if (display.stageParameters) {
+        setStageDimensions(display.stageParameters);
+      }
+    }
+  });
+}
+
+function setStageDimensions(stage) {
+  // Make the skybox fit the stage.
+  var material = skybox.material;
+  scene.remove(skybox);
+
+  // Size the skybox according to the size of the actual stage.
+  var geometry = new THREE.BoxGeometry(stage.sizeX, boxSize, stage.sizeZ);
+  skybox = new THREE.Mesh(geometry, material);
+
+  // Place it on the floor.
+  skybox.position.y = boxSize/2;
+  scene.add(skybox);
+
+  // Place the cube in the middle of the scene, at user height.
+  cube.position.set(0, controls.userHeight, 0);
+}
+
+var movement = false;
+function moving(){
+  moving = true;
+
+}
+
+function keyDownHandler( event ) {
+
+
+
+
+
+
+    switch ( event.keyCode ) {
+
+        case 38: // up
+        case 87: // w
+
+            sphereBody.velocity.x = 5 * dirVector.x;
+            sphereBody.velocity.y = 5 * dirVector.z;
+
+            /*
+
+            if(dirVector.x >=0 && dirVector.z >= 0){
+
+                cube.position.x += Math.sqrt(Math.pow(1, 2)-Math.pow(dirVector.z, 2));
+                cube.position.z += Math.sqrt(Math.pow(1, 2)-Math.pow(dirVector.x, 2));
+            }
+            if(dirVector.x < 0 && dirVector.z >= 0){
+              cube.position.x -= Math.sqrt(Math.pow(1, 2)-Math.pow(dirVector.z, 2));
+              cube.position.z += Math.sqrt(Math.pow(1, 2)-Math.pow(dirVector.x, 2));
+
+            }
+            if(dirVector.x >=0 && dirVector.z <0){
+              cube.position.x += Math.sqrt(Math.pow(1, 2)-Math.pow(dirVector.z, 2));
+              cube.position.z -= Math.sqrt(Math.pow(1, 2)-Math.pow(dirVector.x, 2));
+
+            }
+            if(dirVector.x < 0 && dirVector.z < 0){
+              cube.position.x -= Math.sqrt(Math.pow(1, 2)-Math.pow(dirVector.z, 2));
+              cube.position.z -= Math.sqrt(Math.pow(1, 2)-Math.pow(dirVector.x, 2));
+            }
+            */
+
+            break;
+
+        case 37: // left
+        case 65: // a
+        {
+          dirVectorOrto = dirVector.clone();
+          var axis = new THREE.Vector3( 0, 1, 0 );
+          var angle = Math.PI / 2;
+          dirVectorOrto.applyAxisAngle( axis, angle );
+
+          sphereBody.velocity.x = 5 * dirVectorOrto.x;
+          sphereBody.velocity.y = 5 * dirVectorOrto.z;
+
+
+
+        }    break;
+
+        case 40: // down
+        case 83: // s
+        {
+          sphereBody.velocity.x = -5 * dirVector.x;
+          sphereBody.velocity.y = -5 * dirVector.z;
+        }    break;
+
+        case 39: // right
+        case 68: // d
+        {
+          dirVectorOrto = dirVector.clone();
+          var axis = new THREE.Vector3( 0, 1, 0 );
+          var angle = -Math.PI / 2;
+          dirVectorOrto.applyAxisAngle( axis, angle );
+
+          sphereBody.velocity.x = 5 * dirVectorOrto.x;
+          sphereBody.velocity.y = 5 * dirVectorOrto.z;
+
+
+
+        }    break;
+
+            break;
+
+        case 32: // space
+            console.log(sphereBody.velocity);
+
+            sphereBody.velocity.z = 20;
+            break;
+    }
+}
+
+</script>
+
+</html>
